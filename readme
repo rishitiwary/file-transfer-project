@@ -1,0 +1,84 @@
+# WebSocket File Transfer Application
+
+This is a simple real-time file transfer application built with Node.js (Express + `ws`) for the backend and React (TypeScript) for the frontend. It enables two browser clients to transfer files directly through a central WebSocket server acting as a relay.
+
+## Features
+
+* **Bidirectional Communication:** Real-time data transfer using WebSockets.
+* **File Chunking:** Large files are broken down into smaller chunks for efficient transmission.
+* **MD5 Integrity Checks:** Each chunk's integrity is verified using MD5 hashing to detect corruption during transfer.
+* **Progress Tracking:** Visual progress bars for both sender and receiver.
+* **Dynamic Role Selection:** Users can choose to be a sender or a receiver.
+* **Transfer Codes:** Securely join transfers using a shared code.
+* **File System Access API (Browser):** Attempts to use the native File System Access API for direct file saving on the receiver (with fallback to in-memory download).
+
+## Technologies Used
+
+* **Backend:**
+    * Node.js
+    * Express.js
+    * `ws` (WebSocket library)
+    * `uuid` (for unique IDs)
+* **Frontend:**
+    * React (v18.x)
+    * TypeScript
+    * `crypto-js` (for MD5 hashing)
+    * HTML5 File API
+    * HTML5 File System Access API (experimental browser feature)
+
+## Setup and Installation
+
+Follow these steps to get the application running on your local machine.
+
+
+
+
+## How to Use the Application
+To perform a file transfer, you'll need two browser tabs (or windows) open to http://localhost:3000, representing the sender and receiver.
+
+Important Preparations:
+
+Clear Browser Cache: Before starting a transfer, especially after making changes, perform a "Hard Reload" or "Empty Cache and Hard Reload" in your browser's developer tools (Ctrl+Shift+R or Cmd+Shift+R). This ensures you're running the latest client code.
+
+Open Developer Consoles: Keep the developer console (F12) open in both browser tabs to monitor logs and troubleshoot.
+
+Clear Logs: Clear the logs in both browser consoles and the server terminal before starting a new transfer to easily track the flow.
+
+Step-by-Step Transfer:
+Open two tabs/windows to http://localhost:3000.
+
+Configure the Receiver Tab:
+
+In one browser tab, select the "I am Receiver (Client B)" radio button.
+
+In the "Transfer Code" input field, enter a shared secret code (e.g., 12345678). This code must be identical for both sender and receiver.
+
+Click the "Join Transfer Code" button.
+
+Observe: The receiver's console should show messages like "Connected to server." and "Server: Waiting for sender to initiate transfer with code: 12345678".
+
+Configure the Sender Tab:
+
+In the other browser tab, select the "I am Sender (Client A)" radio button.
+
+In the "Transfer Code" input field, enter the exact same shared secret code (e.g., 12345678).
+
+Click the "Choose File" button and select the file you wish to send. Choose a small to medium-sized file initially (e.g., 5-50 MB) for faster testing.
+
+Click the "Initiate File Transfer" button.
+
+Monitor the Transfer:
+
+Sender: The sender's progress bar should start updating, and console logs will indicate chunks being sent.
+
+Receiver: The receiver's progress bar should also start updating, and console logs will show chunks being received and processed.
+
+Server: The server terminal will log messages about relaying chunk data between the sender and receiver.
+
+File Reassembly and Download:
+
+Once all chunks are received and verified by the receiver, the file will be reassembled.
+
+If your browser supports the File System Access API (e.g., Chrome, Edge), it will prompt you to choose a location to save the file directly.
+
+If not, the browser will automatically trigger a download of the reassembled file (check your downloads folder).
