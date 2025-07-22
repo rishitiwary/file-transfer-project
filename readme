@@ -19,6 +19,8 @@ This is a simple real-time file transfer application built with Node.js (Express
     * Express.js
     * `ws` (WebSocket library)
     * `uuid` (for unique IDs)
+    * npx ts-node src/server.ts to run the node app
+
 * **Frontend:**
     * React (v18.x)
     * TypeScript
