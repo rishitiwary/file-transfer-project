@@ -1,4 +1,4 @@
-## Download archieve folder and extract then go to file-transfer-frontend -> npm i ->npm start - for frontend , for backend go ->file-transfer-backend->npm i->npx ts-node src/server.ts
+## Download archive folder and extract then go to file-transfer-frontend -> npm i ->npm start - for frontend , for backend go ->file-transfer-backend->npm i->npx ts-node src/server.ts
 
 # WebSocket File Transfer Application
 
