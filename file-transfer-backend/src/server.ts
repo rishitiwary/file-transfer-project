@@ -52,11 +52,6 @@ const clientIds = new Map<string, WebSocket>();
 const sessionsByCode = new Map<string, TransferSession>();
 
 
-// Serve React build files (uncomment for production deployment)
-// app.use(express.static(path.join(__dirname, '../../client/build')));
-// app.get('/', (req, res) => {
-//     res.sendFile(path.join(__dirname, '../../client/build', 'index.html'));
-// });
 
 app.get('/', (req, res) => {
     res.status(200).send('WebSocket File Transfer Server is running!');

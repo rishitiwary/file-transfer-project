@@ -27,6 +27,7 @@ This is a simple real-time file transfer application built with Node.js (Express
     * `crypto-js` (for MD5 hashing)
     * HTML5 File API
     * HTML5 File System Access API (experimental browser feature)
+    * npm start to run the react app
 
 ## Setup and Installation
 
