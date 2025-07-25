@@ -1,3 +1,5 @@
+## Download archieve folder and extract then go to file-transfer-frontend -> npm i ->npm start - for frontend , for backend go ->file-transfer-backend->npm i->npx ts-node src/server.ts
+
 # WebSocket File Transfer Application
 
 This is a simple real-time file transfer application built with Node.js (Express + `ws`) for the backend and React (TypeScript) for the frontend. It enables two browser clients to transfer files directly through a central WebSocket server acting as a relay.
