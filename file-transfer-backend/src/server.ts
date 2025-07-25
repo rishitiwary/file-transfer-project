@@ -1,365 +1,232 @@
-// server/src/server.ts
 import express from 'express';
-import { createServer } from 'http';
-import { WebSocket, WebSocketServer } from 'ws';
+import multer from 'multer';
+import crypto from 'crypto';
+import fs from 'fs';
 import path from 'path';
 import { v4 as uuidv4 } from 'uuid';
+import cors from 'cors';
 
-// --- Type Definitions (Must be consistent with client) ---
-interface ChunkManifest {
-    index: number;
-    size: number;
-    md5Hash: string;
-}
-
-interface FileManifest {
-    fileName: string;
-    fileSize: number;
-    totalChunks: number;
-    chunks: ChunkManifest[];
-}
-
-interface WebSocketMessage {
-    type: string;
-    payload?: any;
-    senderId?: string;
-    targetId?: string;
-}
-
-// --- New Transfer Session Management ---
-interface TransferSession {
-    transferCode: string;
-    senderWs: WebSocket | null;
-    receiverWs: WebSocket | null;
-    senderId: string | null;
-    receiverId: string | null;
-    manifest: FileManifest | null;
-    receivedChunkCount: number;
-    expectedChunks: number;
-    fileName: string;
-    transferStartTime: number;
-}
-
-// --- Server Setup ---
 const app = express();
-const httpServer = createServer(app);
-const wss = new WebSocketServer({ server: httpServer });
+const upload = multer({ storage: multer.memoryStorage() });
+const PORT = 8080;
 
-const PORT = process.env.PORT || 8080;
+// Type for transfer sessions
+type FileTransfer = {
+  fileName: string;
+  fileSize: number;
+  totalChunks: number;
+  receivedChunks: Map<number, Buffer>;
+  createdAt: number;
+  tempDir?: string;
+  completed?: boolean;
+};
 
-const clients = new Map<WebSocket, string>();
-const clientIds = new Map<string, WebSocket>();
-const sessionsByCode = new Map<string, TransferSession>();
+// In-memory storage for transfers
+const transfers = new Map<string, FileTransfer>();
 
+// Cleanup old transfers hourly
+setInterval(() => cleanupOldTransfers(), 60 * 60 * 1000);
 
+function cleanupOldTransfers() {
+  const now = Date.now();
+  const oneHour = 60 * 60 * 1000;
 
-app.get('/', (req, res) => {
-    res.status(200).send('WebSocket File Transfer Server is running!');
+  transfers.forEach((transfer, transferId) => {
+    if (now - transfer.createdAt > oneHour) {
+      cleanupTransfer(transferId);
+    }
+  });
+}
+
+function cleanupTransfer(transferId: string) {
+  const transfer = transfers.get(transferId);
+  if (transfer?.tempDir) {
+    try {
+      fs.rmSync(transfer.tempDir, { recursive: true });
+    } catch (err) {
+      console.error(`Error cleaning up transfer ${transferId}:`, err);
+    }
+  }
+  transfers.delete(transferId);
+}
+
+function validateFileName(fileName: string): boolean {
+  return !/[\\/:*?"<>|]/.test(fileName) && fileName.length <= 255;
+}
+
+app.use(express.json());
+app.use(cors());
+
+// Initiate a new file transfer
+app.post('/initiate-transfer', (req, res) => {
+  const { fileName, fileSize, totalChunks } = req.body;
+  
+  if (!fileName || !fileSize || !totalChunks) {
+    return res.status(400).json({ error: 'Missing required fields' });
+  }
+
+  if (!validateFileName(fileName)) {
+    return res.status(400).json({ error: 'Invalid file name' });
+  }
+
+  const transferId = crypto.randomBytes(8).toString('hex');
+  const createdAt = Date.now();
+
+  transfers.set(transferId, {
+    fileName,
+    fileSize,
+    totalChunks,
+    receivedChunks: new Map(),
+    createdAt
+  });
+
+  console.log(`Transfer initiated: ${transferId}`);
+  res.json({ transferId });
 });
 
+// Upload a file chunk
+app.post('/upload-chunk/:transferId', upload.single('chunk'), (req, res) => {
+  try {
+    const { transferId } = req.params;
+    const { chunkIndex } = req.body;
+    const chunkData = req.file?.buffer;
 
-// --- WebSocket Server Logic ---
-wss.on('connection', (ws: WebSocket) => {
-    const clientId = uuidv4();
-    clients.set(ws, clientId);
-    clientIds.set(clientId, ws);
-    console.log(`[Server] Client ${clientId} connected.`);
+    if (!chunkData) {
+      return res.status(400).json({ error: 'No chunk data provided' });
+    }
 
-    ws.send(JSON.stringify({ type: 'your-id', payload: clientId }));
+    const transfer = transfers.get(transferId);
+    if (!transfer) {
+      return res.status(404).json({ error: 'Transfer not found' });
+    }
 
-    ws.on('message', async (message: Buffer) => {
-        let parsedMessage: WebSocketMessage;
-        try {
-            parsedMessage = JSON.parse(message.toString());
-        } catch (e) {
-            if (message instanceof Buffer) {
-                let session: TransferSession | undefined;
-                let currentTransferCode: string | undefined;
+    const index = parseInt(chunkIndex);
+    if (isNaN(index) || index < 0 || index >= transfer.totalChunks) {
+      return res.status(400).json({ error: 'Invalid chunk index' });
+    }
 
-                for (const [code, s] of sessionsByCode.entries()) {
-                    if (s.senderWs === ws) {
-                        session = s;
-                        currentTransferCode = code;
-                        break;
-                    }
-                }
+    transfer.receivedChunks.set(index, chunkData);
+    console.log(`Chunk ${index} received for ${transferId}`);
 
-                if (session && currentTransferCode) {
-                    if (session.receiverWs && session.receiverWs.readyState === WebSocket.OPEN) {
-                        session.receiverWs.send(message, { binary: true });
-                        session.receivedChunkCount++;
-                        if (session.receivedChunkCount % 50 === 0 || session.receivedChunkCount === session.expectedChunks) {
-                            console.log(`[Server] Transfer ${currentTransferCode}: Relayed ${session.receivedChunkCount}/${session.expectedChunks} chunks (binary) to receiver.`);
-                        }
-                    } else {
-                        console.warn(`[Server] Binary chunk for ${currentTransferCode} received from ${clientId}, but receiver is not open. Discarding chunk.`);
-                    }
-                } else {
-                    console.warn(`[Server] Received unassociated binary message from ${clientId}. No active transfer session found for this sender.`);
-                }
-            } else {
-                console.error(`[Server] Client ${clientId}: Failed to parse message. Not JSON and not Buffer.`);
-            }
-            return;
-        }
-
-        console.log(`[Server] Client ${clientId} received message type: ${parsedMessage.type}`);
-
-        switch (parsedMessage.type) {
-            case 'register-peer':
-                break;
-
-            case 'initiate-transfer':
-                const { transferCode, manifest } = parsedMessage.payload;
-
-                if (!transferCode || !manifest) {
-                    ws.send(JSON.stringify({ type: 'transfer-error', payload: 'Transfer code or manifest missing.' }));
-                    console.warn(`[Server] Client ${clientId}: Initiate transfer failed - missing code or manifest.`);
-                    return;
-                }
-
-                let session = sessionsByCode.get(transferCode);
-
-                if (session) {
-                    session.senderWs = ws;
-                    session.senderId = clientId;
-                    session.manifest = manifest;
-                    session.expectedChunks = manifest.totalChunks;
-                    session.fileName = manifest.fileName;
-                    session.receivedChunkCount = 0;
-                    session.transferStartTime = Date.now();
-                    console.log(`[Server] Client ${clientId}: Sender re-initiated/joined existing transfer session for code: ${transferCode}.`);
-
-                    ws.send(JSON.stringify({
-                        type: 'transfer-initiated',
-                        payload: { transferId: transferCode }
-                    }));
-
-                    if (session.receiverWs && session.receiverWs.readyState === WebSocket.OPEN) {
-                        console.log(`[Server] Transfer ${transferCode}: Informing receiver ${session.receiverId} about re-initiated transfer.`);
-                        session.receiverWs.send(JSON.stringify({
-                            type: 'incoming-transfer',
-                            payload: {
-                                transferId: transferCode,
-                                senderId: clientId,
-                                manifest: manifest
-                            }
-                        }));
-                    } else {
-                         console.log(`[Server] Receiver for code ${transferCode} (Client ${session.receiverId}) is not yet open or connected.`);
-                    }
-
-                } else {
-                    session = {
-                        transferCode: transferCode,
-                        senderWs: ws,
-                        receiverWs: null,
-                        senderId: clientId,
-                        receiverId: null,
-                        manifest: manifest,
-                        receivedChunkCount: 0,
-                        expectedChunks: manifest.totalChunks,
-                        fileName: manifest.fileName,
-                        transferStartTime: Date.now(),
-                    };
-                    sessionsByCode.set(transferCode, session);
-                    console.log(`[Server] Client ${clientId}: New transfer session created for code: ${transferCode}. File: ${manifest.fileName}`);
-                    ws.send(JSON.stringify({
-                        type: 'transfer-initiated',
-                        payload: { transferId: transferCode }
-                    }));
-                }
-                break;
-
-            case 'join-transfer':
-                const { transferCode: joinCode } = parsedMessage.payload;
-                if (!joinCode) {
-                    ws.send(JSON.stringify({ type: 'error', payload: 'Join code missing.' }));
-                    console.warn(`[Server] Client ${clientId}: Join transfer failed - missing code.`);
-                    return;
-                }
-
-                let joinSession = sessionsByCode.get(joinCode);
-
-                if (joinSession) {
-                    joinSession.receiverWs = ws;
-                    joinSession.receiverId = clientId;
-                    console.log(`[Server] Client ${clientId}: Receiver joined transfer session for code: ${joinCode}.`);
-
-                    if (joinSession.manifest) {
-                        console.log(`[Server] Receiver ${clientId} for code ${joinCode} joined. Sending manifest immediately.`);
-                        ws.send(JSON.stringify({
-                            type: 'incoming-transfer',
-                            payload: {
-                                transferId: joinCode,
-                                senderId: joinSession.senderId || 'unknown',
-                                manifest: joinSession.manifest
-                            }
-                        }));
-                    } else {
-                        console.log(`[Server] Receiver ${clientId} for code ${joinCode} joined, but no manifest yet. Sending wait message.`);
-                        ws.send(JSON.stringify({
-                            type: 'wait-for-sender',
-                            payload: { message: `Waiting for sender to initiate transfer with code: ${joinCode}` }
-                        }));
-                    }
-
-                    if (joinSession.senderWs && joinSession.senderWs.readyState === WebSocket.OPEN) {
-                        console.log(`[Server] Transfer ${joinCode}: Notifying sender ${joinSession.senderId} that receiver ${clientId} joined.`);
-                        joinSession.senderWs.send(JSON.stringify({
-                            type: 'receiver-joined',
-                            payload: { transferId: joinCode, receiverId: clientId }
-                        }));
-                    }
-                } else {
-                    sessionsByCode.set(joinCode, {
-                        transferCode: joinCode,
-                        senderWs: null,
-                        receiverWs: ws,
-                        senderId: null,
-                        receiverId: clientId,
-                        manifest: null,
-                        receivedChunkCount: 0,
-                        expectedChunks: 0,
-                        fileName: 'N/A',
-                        transferStartTime: 0,
-                    });
-                    console.log(`[Server] Client ${clientId}: Receiver created a new, waiting transfer session for code: ${joinCode}.`);
-                    ws.send(JSON.stringify({
-                        type: 'wait-for-sender',
-                        payload: { message: `Waiting for sender to initiate transfer with code: ${joinCode}` }
-                    }));
-                }
-                break;
-
-            case 'chunk-metadata':
-                const { transferCode: metaTransferCode, chunkIndex, originalMd5 } = parsedMessage.payload;
-                const metaSession = sessionsByCode.get(metaTransferCode);
-
-                if (metaSession && metaSession.receiverWs && metaSession.receiverWs.readyState === WebSocket.OPEN) {
-                    console.log(`[Server] Relaying chunk-metadata for code ${metaTransferCode}, index ${chunkIndex} to receiver ${metaSession.receiverId}.`);
-                    metaSession.receiverWs.send(JSON.stringify({
-                        type: 'chunk-metadata',
-                        payload: {
-                            transferId: metaTransferCode,
-                            chunkIndex: chunkIndex,
-                            originalMd5: originalMd5
-                        }
-                    }));
-                } else {
-                    console.warn(`[Server] Could not relay chunk-metadata for code ${metaTransferCode} (Chunk: ${chunkIndex}) from sender ${clientId}. Receiver not ready or session not found.`);
-                }
-                break;
-
-            case 'transfer-complete-sender':
-                const { transferId: senderCompleteTransferId } = parsedMessage.payload;
-                const senderCompleteSession = sessionsByCode.get(senderCompleteTransferId);
-                if (senderCompleteSession) {
-                    console.log(`[Server] Sender ${clientId} for transfer ${senderCompleteTransferId} indicated completion.`);
-                    if (senderCompleteSession.receiverWs && senderCompleteSession.receiverWs.readyState === WebSocket.OPEN) {
-                        console.log(`[Server] Notifying receiver ${senderCompleteSession.receiverId} that sender completed for ${senderCompleteTransferId}.`);
-                        senderCompleteSession.receiverWs.send(JSON.stringify({
-                            type: 'transfer-complete-server-signal',
-                            payload: { transferId: senderCompleteTransferId }
-                        }));
-                    } else {
-                        console.warn(`[Server] Sender completed for ${senderCompleteTransferId}, but no active receiver to notify.`);
-                    }
-                }
-                break;
-
-            case 'transfer-complete-receiver':
-                const { transferId: receiverCompleteTransferId } = parsedMessage.payload;
-                const receiverCompleteSession = sessionsByCode.get(receiverCompleteTransferId);
-                if (receiverCompleteSession) {
-                    console.log(`[Server] Receiver ${clientId} for transfer ${receiverCompleteTransferId} indicated completion (reassembly).`);
-                    if (receiverCompleteSession.senderWs && receiverCompleteSession.senderWs.readyState === WebSocket.OPEN) {
-                        console.log(`[Server] Notifying sender ${receiverCompleteSession.senderId} that transfer ${receiverCompleteTransferId} is finalized.`);
-                        receiverCompleteSession.senderWs.send(JSON.stringify({
-                            type: 'transfer-finalized',
-                            payload: { transferId: receiverCompleteTransferId, status: 'success' }
-                        }));
-                    }
-                    if (receiverCompleteSession.receiverWs && receiverCompleteSession.receiverWs.readyState === WebSocket.OPEN) {
-                        console.log(`[Server] Notifying receiver ${receiverCompleteSession.receiverId} that transfer ${receiverCompleteTransferId} is finalized.`);
-                        receiverCompleteSession.receiverWs.send(JSON.stringify({
-                            type: 'transfer-finalized',
-                            payload: { transferId: receiverCompleteTransferId, status: 'success' }
-                        }));
-                    }
-                    sessionsByCode.delete(receiverCompleteTransferId);
-                    console.log(`[Server] Transfer session ${receiverCompleteTransferId} finalized and cleaned up.`);
-                }
-                break;
-
-            case 'transfer-aborted':
-                const { transferId: abortedTransferId, reason } = parsedMessage.payload;
-                const abortedSession = sessionsByCode.get(abortedTransferId);
-                if (abortedSession) {
-                    console.log(`[Server] Transfer ${abortedTransferId} explicitly aborted by client ${clientId}. Reason: ${reason}`);
-                    if (abortedSession.senderWs && abortedSession.senderWs !== ws && abortedSession.senderWs.readyState === WebSocket.OPEN) {
-                        abortedSession.senderWs.send(JSON.stringify({ type: 'transfer-aborted', payload: { transferId: abortedTransferId, reason: `Other side aborted: ${reason}` } }));
-                    }
-                    if (abortedSession.receiverWs && abortedSession.receiverWs !== ws && abortedSession.receiverWs.readyState === WebSocket.OPEN) {
-                        abortedSession.receiverWs.send(JSON.stringify({ type: 'transfer-aborted', payload: { transferId: abortedTransferId, reason: `Other side aborted: ${reason}` } }));
-                    }
-                    sessionsByCode.delete(abortedTransferId);
-                    console.log(`[Server] Transfer session ${abortedTransferId} aborted and cleaned up.`);
-                }
-                break;
-
-            case 'retransmit-chunk':
-                console.warn(`[Server] Retransmit chunk request received but not fully implemented.`);
-                break;
-
-            default:
-                console.warn(`[Server] Client ${clientId}: Unknown message type: ${parsedMessage.type}`, parsedMessage);
-        }
-    });
-
-    // FIX APPLIED HERE: Explicitly type the 'event' parameter for the 'close' event
-    ws.on('close', (event: { code: number; reason: string; wasClean: boolean }) => {
-        const clientId = clients.get(ws);
-        if (clientId) {
-            console.log(`[Server] Client ${clientId} disconnected. Code: ${event.code}, Reason: ${event.reason || 'No reason'}.`);
-            clients.delete(ws);
-            clientIds.delete(clientId);
-
-            sessionsByCode.forEach((session, transferCode) => {
-                let sessionUpdated = false;
-                if (session.senderWs === ws) {
-                    session.senderWs = null;
-                    console.log(`[Server] Sender for transfer ${transferCode} (Client ${clientId}) disconnected.`);
-                    sessionUpdated = true;
-                } else if (session.receiverWs === ws) {
-                    session.receiverWs = null;
-                    console.log(`[Server] Receiver for transfer ${transferCode} (Client ${clientId}) disconnected.`);
-                    sessionUpdated = true;
-                }
-
-                if (sessionUpdated) {
-                    if (!session.senderWs && session.receiverWs && session.receiverWs.readyState === WebSocket.OPEN) {
-                        session.receiverWs.send(JSON.stringify({ type: 'transfer-aborted', payload: { transferId: transferCode, reason: 'Sender disconnected' } }));
-                        console.log(`[Server] Notified receiver ${session.receiverId} that sender ${clientId} disconnected for transfer ${transferCode}.`);
-                    } else if (!session.receiverWs && session.senderWs && session.senderWs.readyState === WebSocket.OPEN) {
-                        session.senderWs.send(JSON.stringify({ type: 'transfer-aborted', payload: { transferId: transferCode, reason: 'Receiver disconnected' } }));
-                        console.log(`[Server] Notified sender ${session.senderId} that receiver ${clientId} disconnected for transfer ${transferCode}.`);
-                    } else if (!session.senderWs && !session.receiverWs) {
-                        sessionsByCode.delete(transferCode);
-                        console.log(`[Server] Transfer ${transferCode} session fully cleaned up due to both parties disconnecting.`);
-                    }
-                }
-            });
-        }
-    });
-
-    ws.on('error', (error) => {
-        const clientId = clients.get(ws) || 'unknown';
-        console.error(`[Server] Client ${clientId} WebSocket error:`, error);
-        ws.close(1011, "Unexpected error occurred");
-    });
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Chunk upload error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
-httpServer.listen(PORT, () => {
-    console.log(`WebSocket File Transfer Server is running on http://localhost:${PORT}`);
+// Finalize the transfer and assemble file
+app.post('/finalize-transfer/:transferId', async (req, res) => {
+  try {
+    const { transferId } = req.params;
+    const transfer = transfers.get(transferId);
+
+    if (!transfer) {
+      return res.status(404).json({ error: 'Transfer not found' });
+    }
+
+    if (transfer.receivedChunks.size !== transfer.totalChunks) {
+      return res.status(400).json({ 
+        error: `Incomplete transfer (${transfer.receivedChunks.size}/${transfer.totalChunks} chunks)`,
+        missingChunks: Array.from(
+          { length: transfer.totalChunks }, 
+          (_, i) => i
+        ).filter(i => !transfer.receivedChunks.has(i))
+      });
+    }
+
+    // Create temp directory
+    const tempDir = path.join(__dirname, 'temp', `transfer-${transferId}`);
+    fs.mkdirSync(tempDir, { recursive: true });
+
+    // Write all chunks to disk in order
+    const outputPath = path.join(tempDir, transfer.fileName);
+    const writeStream = fs.createWriteStream(outputPath);
+
+    for (let i = 0; i < transfer.totalChunks; i++) {
+      const chunk = transfer.receivedChunks.get(i);
+      if (!chunk) {
+        throw new Error(`Missing chunk ${i}`);
+      }
+      writeStream.write(chunk);
+    }
+
+    writeStream.end();
+
+    // Update transfer with completion info
+    transfer.completed = true;
+    transfer.tempDir = tempDir;
+
+    res.json({ 
+      success: true,
+      fileName: transfer.fileName,
+      fileSize: transfer.fileSize
+    });
+  } catch (err) {
+    console.error('Finalization error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Get all active transfers
+app.get('/transfers', (req, res) => {
+  const transfersList = Array.from(transfers.entries()).map(([id, t]) => ({
+    transferId: id,
+    fileName: t.fileName,
+    fileSize: t.fileSize,
+    progress: t.receivedChunks.size / t.totalChunks,
+    completed: t.receivedChunks.size === t.totalChunks,
+    createdAt: t.createdAt
+  }));
+
+  res.json(transfersList);
+});
+
+// Download completed file
+app.get('/download/:transferId', (req, res) => {
+  const { transferId } = req.params;
+  const transfer = transfers.get(transferId);
+
+  if (!transfer || !transfer.completed || !transfer.tempDir) {
+    return res.status(404).json({ error: 'Transfer not found or not completed' });
+  }
+
+  const filePath = path.join(transfer.tempDir, transfer.fileName);
+  res.download(filePath, transfer.fileName, (err) => {
+    if (err) {
+      console.error('Download failed:', err);
+      if (!res.headersSent) {
+        res.status(500).json({ error: 'Download failed' });
+      }
+    }
+  });
+});
+
+// Get transfer status
+app.get('/transfer-status/:transferId', (req, res) => {
+  const { transferId } = req.params;
+  const transfer = transfers.get(transferId);
+
+  if (!transfer) {
+    return res.status(404).json({ error: 'Transfer not found' });
+  }
+
+  res.json({
+    fileName: transfer.fileName,
+    fileSize: transfer.fileSize,
+    totalChunks: transfer.totalChunks,
+    receivedChunks: transfer.receivedChunks.size,
+    progress: (transfer.receivedChunks.size / transfer.totalChunks) * 100,
+    completed: transfer.completed || false,
+    createdAt: transfer.createdAt
+  });
+});
+
+// Start server
+app.listen(PORT, () => {
+  console.log(`Server running on http://localhost:${PORT}`);
+  
+  // Ensure directories exist
+  fs.mkdirSync(path.join(__dirname, 'temp'), { recursive: true });
+  fs.mkdirSync(path.join(__dirname, 'uploads'), { recursive: true });
 });
