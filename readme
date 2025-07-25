@@ -1,4 +1,7 @@
+## I have followed 2 methods first one is using api manually upload and chunk store on server and then client can download and second is throught he web socket for api you can download the fileupload using api and second archive
 ## Download archive folder and extract then go to file-transfer-frontend -> npm i ->npm start - for frontend , for backend go ->file-transfer-backend->npm i->npx ts-node src/server.ts
+
+
 
 # WebSocket File Transfer Application
 
